@@ -1,0 +1,347 @@
+var batch = require('users/fitoprincipe/geetools:batch');
+print(batch.help);
+
+
+//var Scotty = ee.FeatureCollection('users/shaeakbarpour/BasinPoints').filter(ee.Filter("Feature_Index"))
+
+Map.centerObject(Scotty, 13);
+
+//cloud mask landsat7,landsat5, and landsat8 based on the pixel_qa band of Landsat SR data.
+// function for cloud masking on three types of lan dsat
+
+var LC8_BANDS = ['B4',  'B5', 'B10','pixel_qa']; //Landsat 8
+var LC7_BANDS = ['B3',  'B4','B6','pixel_qa']; //Landsat 7
+var LC5_BANDS = [ 'B3',  'B4','B6','pixel_qa']; //Llandsat 5
+var STD_NAMES = ['red', 'nir', 'temp','qa'];
+
+var cloudmasklandsat7and5and8= function(image){
+    var Qlandsat5and7= image.select('qa');
+    var cloudShadowBitMask = (1 << 3);
+    var cloudsBitMask = (1 << 5);
+    var mask5and7=Qlandsat5and7.clip(Scotty).bitwiseAnd(cloudShadowBitMask).eq(0)
+                                   .and(Qlandsat5and7.bitwiseAnd(cloudsBitMask).eq(0));
+    return image.updateMask(mask5and7);
+};
+
+
+
+
+var landsat8 = ee.ImageCollection('LANDSAT/LC08/C01/T1_SR').select(LC8_BANDS, STD_NAMES)
+                  .filterDate('2015-01-01', '2020-1-1')
+                  .filterBounds(Scotty)
+                  .filter(ee.Filter.lt('CLOUD_COVER', 50))
+                 .map(cloudmasklandsat7and5and8);
+
+var landsat7 = ee.ImageCollection('LANDSAT/LE07/C01/T1_SR').select(LC7_BANDS, STD_NAMES)
+                  .filterDate('2012-01-01', '2022-12-31')
+                  .filterBounds(Scotty)
+                  .filter(ee.Filter.lt('CLOUD_COVER', 50))
+                 .map(cloudmasklandsat7and5and8);
+
+var landsat5 = ee.ImageCollection('LANDSAT/LT05/C01/T1_SR').select(LC7_BANDS, STD_NAMES)
+                  .filterDate('1995-05-01', '1995-10-31')
+                  .filterBounds(Scotty)
+                  .filter(ee.Filter.lt('CLOUD_COVER', 1))
+                 .map(cloudmasklandsat7and5and8);
+
+var landsatcolor={
+  min: 0,
+  max: 3000,
+  gamma: 1.4,
+};
+//Map.addLayer(landsat8,landsatcolor, 'Landsat8' );
+//Map.addLayer(landsat7,landsatcolor, 'Landsat7' );
+//Map.addLayer(landsat5,landsatcolor, 'Landsat5' );
+  
+  
+  // totall image collection
+//var landsatimage = ee.ImageCollection(landsat5.merge(landsat8).merge(landsat7));
+var landsatimage = ee.ImageCollection(landsat5);
+Map.addLayer(landsatimage,landsatcolor, 'Landsat' );
+print(landsatimage)
+ //    NDVI
+ 
+ var setNdviMinMax=function (img) {
+  var minMax = img
+    .select('NDVI')
+    .reduceRegion({
+      reducer: ee.Reducer.minMax(),
+      scale: 30,
+      maxPixels: 1e13
+    })
+    ;
+  return img.set({
+    'NDVI_min': minMax.get('NDVI_min'),
+    'NDVI_max': minMax.get('NDVI_max'),
+  }).toFloat();
+};
+var NDVI=function(image){
+  var ndvi = image.addBands(image.normalizedDifference(['nir', 'red']).rename('NDVI'));
+  return setNdviMinMax(ndvi).clip(Scotty).toFloat();
+};
+
+  var ndviParams = {
+  min: -1,
+  max: 1.0,
+  palette: [
+    'FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', '74A901',
+    '66A000', '529400', '3E8601', '207401', '056201', '004C00', '023B01',
+    '012E01', '011D01', '011301'
+  ],
+};
+
+var landsatwithndvi=landsatimage.map(NDVI).filter(ee.Filter.notNull(['NDVI_min', 'NDVI_max']));
+print(landsatwithndvi);
+Map.addLayer(landsatwithndvi.select('NDVI').filter(ee.Filter.notNull(['NDVI_min', 'NDVI_max'])), ndviParams, 'landsatNdvi');
+
+var addMinMaxBands=function (img) {
+  var minMaxBands = ee.Image.constant([
+    img.get('NDVI_min'),
+    img.get('NDVI_max')])
+    .rename(['NDVImin', 'NDVImax']);
+  return img.clip(Scotty).addBands(minMaxBands).toFloat();
+};
+ //2: map the min max function on collection
+var landsatNdviminmax = landsatwithndvi.map(addMinMaxBands).filterBounds(Scotty);
+
+//fv 
+var addFVband=function (img) {
+  var ndvi = img.select('NDVI');
+  var ndviMin = img.select('NDVImin');
+  var ndviMax = img.select('NDVImax');
+  var fvBand = ndvi
+    .subtract(ndviMin)
+    .divide(ndviMax.subtract(ndviMin))
+    .rename('FV');
+  return img.clip(Scotty).addBands(fvBand).toFloat();
+};
+//4: fv COLLECTION FOR LANDSAT
+var landsatfv= landsatNdviminmax.map(addFVband);
+
+// Em
+
+var addEMband=function (img){
+  var FVb = img.select('FV');
+  var a= ee.Number(0.004);
+  var b= ee.Number(0.986);
+  var EMBand = FVb
+    .multiply(a).add(b).rename('EM');
+  return img.addBands(EMBand).toFloat();
+};
+
+//5: EM COLLECTION FOR EACH LANDSAT
+  
+var landsatEM= landsatfv.map(addEMband);
+print(landsatEM);
+
+//6: Thermal landsat 
+var LST=function(image){
+  var Thermal = image.addBands(image.select('temp').multiply(0.1).rename('Thermal'));
+  return Thermal};
+
+var landsatthermal= landsatEM.map(LST);
+print(landsatthermal);
+
+var LStfunction = function(image){
+  var LSTEQ=image.expression(
+    '(Tb/(1 + (0.001145* (Tb / 1.438))*log(Ep)))-273.15', {
+      'Tb': image.select('Thermal'),
+      'Ep': image.select('EM')}).rename('LST');
+ return  image.addBands(LSTEQ)};
+
+var LST= landsatthermal.map(LStfunction);
+
+
+
+
+Map.addLayer(LST.select('LST'),{min: -30, max: 32, palette: ['white','blue','green','yellow' ,'red']},'LST');
+var LSTallImages = LST.select(['LST'])
+print(LST)
+/////////////// End of LST calculation for each image
+
+///////////////////create function to calculate mean values for each polygon
+var pointsmean = function(image) {
+  var means = image.reduceRegions({
+    collection: Scotty.select(['Feature Index']),
+    reducer: ee.Reducer.mean(),
+    scale: 30
+  })
+print(pointsmean)
+ 
+  // assign time for every feature
+  means = means.map(function(f) { return f.set({date: image.date().format("YYYY-MM-dd")}) })
+  
+  return means.copyProperties(image)
+};
+
+var startdate = '1995-05-01' // insert
+var enddate = '1995-10-31' // insert
+
+var finalLST= LSTallImages.map(pointsmean).flatten()
+.sort('date', false)
+.select(['date', 'mean', 'Feature Index'])
+print(finalLST, 'final LST')
+ 
+Export.table.toDrive({
+collection: finalLST,
+  description: 'LST_'+startdate+'TO'+enddate,
+fileFormat: 'CSV'
+});
+
+
+
+
+
+
+
+
+
+/// Annual mean LST
+
+var years = ee.List.sequence(1995, 1995);
+print (years);
+var collectYear = ee.ImageCollection(years
+  .map(function(y) {
+    var start = ee.Date.fromYMD(y, 1, 1);
+    var end = start.advance(12, 'month');
+    return LST.filterDate(start, end).reduce(ee.Reducer.mean()).float();
+}));
+print (collectYear);
+
+
+
+
+
+
+
+Map.addLayer(collectYear.select('LST_mean'),{min: -30, max: 32, palette: ['white','blue','green','yellow' ,'red']},'LST_Annual');
+
+
+
+var finalCollection = collectYear.map(function(image){
+  return image.visualize({bands: ['LST_mean', 'NDVI_mean'], min: -40, max: 40});
+});
+
+var annualmeanlst=collectYear.select('LST_mean');
+print(annualmeanlst);
+
+
+
+
+batch.Download.ImageCollection.toDrive(annualmeanlst, "LST_Mean_Annual", 
+ {name:'LST_Mean_1995',
+  scale: 5,
+  region: Scotty 
+});
+
+
+/*var listOfImages = annualmeanlst.toList(annualmeanlst.size());
+var Image1 = listOfImages.get(28);
+var Image2 = listOfImages.get(29);
+var Image3 = listOfImages.get(30);
+var Image4 = listOfImages.get(31);
+var Image5 = listOfImages.get(32);
+var Image6 = listOfImages.get(33);
+var Image7 = listOfImages.get(34);
+
+var Test1 = ee.ImageCollection.fromImages([Image1]);
+var Test2 = ee.ImageCollection.fromImages([Image2]);
+var Test3 = ee.ImageCollection.fromImages([Image3]);
+var Test4= ee.ImageCollection.fromImages([Image4]);
+var Test5= ee.ImageCollection.fromImages([Image5]);
+var Test6= ee.ImageCollection.fromImages([Image6]);
+var Test7= ee.ImageCollection.fromImages([Image7]);
+
+
+batch.Download.ImageCollection.toDrive(Test1, "LST_Mean_Annual", 
+ {name:'LST_Mean_2012',
+  scale: 30,
+  region: Scotty 
+});
+batch.Download.ImageCollection.toDrive(Test2, "LST_Mean_Annual", 
+ {name:'LST_Mean_2013',
+  scale: 30,
+  region: Scotty 
+});
+batch.Download.ImageCollection.toDrive(Test3, "LST_Mean_Annual", 
+ {name:'LST_Mean_2014',
+  scale: 30,
+  region: Scotty 
+});
+batch.Download.ImageCollection.toDrive(Test4, "LST_Mean_Annual", 
+ {name:'LST_Mean_2015',
+  scale: 30,
+  region: Scotty 
+});
+batch.Download.ImageCollection.toDrive(Test5, "LST_Mean_Annual", 
+ {name:'LST_Mean_2016',
+  scale: 30,
+  region: Scotty 
+});
+batch.Download.ImageCollection.toDrive(Test6, "LST_Mean_Annual", 
+ {name:'LST_Mean_2017',
+  scale: 30,
+  region: Scotty 
+});
+batch.Download.ImageCollection.toDrive(Test7, "LST_Mean_Annual", 
+ {name:'LST_Mean_2018',
+  scale: 30,
+  region: Scotty 
+});*/
+
+
+
+
+/// seanonal mean lst
+
+var Landsatlstmeaneqseasonal=function (image) {
+  var mean = image
+    .select('LST')
+    .reduceRegion({
+      reducer: ee.Reducer.mean(),
+      scale: 30,
+      maxPixels: 1e13
+    });
+  return image.set({
+    'LST8_mean': mean.get('LST'),
+  });
+};
+
+
+var Landsatlstfunctionseasonal=function(image){
+  var lstselect = image.addBands(image
+    .select('LST'));
+  return Landsatlstmeaneqseasonal(lstselect).clip(Scotty);
+};
+
+
+
+var Landsatlstseasonal=LST.select('LST').map(Landsatlstfunctionseasonal);
+
+
+
+/// plot mean annual and monthly land surface temprature
+
+var winter = Landsatlstseasonal.filter(ee.Filter.calendarRange(1984,2019,'year'))
+.filter(ee.Filter.calendarRange(12,2,'month'));
+var spring = Landsatlstseasonal.filter(ee.Filter.calendarRange(1984,2019,'year'))
+.filter(ee.Filter.calendarRange(3,5,'month'));
+var summer = Landsatlstseasonal.filter(ee.Filter.calendarRange(1984,2019,'year'))
+.filter(ee.Filter.calendarRange(6,8,'month'));
+var fall = Landsatlstseasonal.filter(ee.Filter.calendarRange(1984,2019,'year'))
+.filter(ee.Filter.calendarRange(9,11,'month'));
+
+ print(winter);
+  print(spring);
+ print(summer);
+ print(fall);
+ var vizParams = {min: -30, max: 30, palette: [
+    'FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', '74A901',
+    '66A000', '529400', '3E8601', '207401', '056201', '004C00', '023B01',
+    '012E01', '011D01', '011301'
+  ]};    
+    
+Map.addLayer(spring.select('LST_1'),vizParams,'Spring');
+Map.addLayer(winter.select('LST_1'),vizParams,'Winter');
+Map.addLayer(fall.select('LST_1'),vizParams,'Fall');
+Map.addLayer(summer.select('LST_1'),vizParams,'Summer');
